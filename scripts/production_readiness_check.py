@@ -1,5 +1,6 @@
-# scripts/production_readiness_check.py
-import requests, redis, subprocess
+import requests
+import redis
+from kafka.admin import KafkaAdminClient
 
 results = {}
 
@@ -49,12 +50,10 @@ check("Redis reachable", lambda:
 
 print("\n=== KAFKA ===")
 def check_kafka_topics():
-    result = subprocess.run(
-        ["docker", "exec", "lab28-kafka-1", "kafka-topics", "--list",
-         "--bootstrap-server", "localhost:9092"],
-        capture_output=True, text=True
-    )
-    assert "data.raw" in result.stdout
+    client = KafkaAdminClient(bootstrap_servers="localhost:9092", client_id="lab28-readiness")
+    topics = client.list_topics()
+    client.close()
+    assert "data.raw" in topics
 
 check("Kafka topics exist", check_kafka_topics)
 

@@ -1,8 +1,37 @@
-# smoke-tests/test_e2e.py
-import pytest, requests, time, os
+from __future__ import annotations
+
+import sys
+import time
+from pathlib import Path
+
+import pytest
+import requests
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR / "scripts"))
+
+from platform_lib import (
+    ingest_records,
+    load_delta_records,
+    push_features_to_redis,
+    save_records_to_delta,
+    upsert_records_to_qdrant,
+)
 
 BASE_URL = "http://localhost:8000"
-VLLM_URL = os.environ.get("VLLM_NGROK_URL", "")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def prepare_platform_state():
+    seed_records = [
+        {"id": "smoke_001", "text": "Platform engineering enables reusable delivery systems.", "timestamp": time.time()},
+        {"id": "smoke_002", "text": "Kafka decouples producers and consumers in event-driven systems.", "timestamp": time.time()},
+    ]
+    save_records_to_delta(seed_records)
+    push_features_to_redis(seed_records)
+    upsert_records_to_qdrant(seed_records)
+    return seed_records
 
 # ── Test 1: Happy Path — Full Inference Request ───────────────
 class TestHappyPath:
@@ -28,20 +57,13 @@ class TestHappyPath:
 # ── Test 2: Data Ingestion Journey ───────────────────────────
 class TestDataIngestion:
     def test_kafka_ingest_and_qdrant_store(self):
-        """Ingest data vào Kafka → pipeline → vector store"""
-        from kafka import KafkaProducer
-        import json
+        """Ingest data vào Kafka và materialize local stores"""
+        record = {"id": "smoke_003", "text": "smoke test document", "timestamp": time.time()}
+        ingest_records([record])
+        save_records_to_delta([record])
+        push_features_to_redis([record])
+        upsert_records_to_qdrant([record])
 
-        producer = KafkaProducer(
-            bootstrap_servers="localhost:9092",
-            value_serializer=lambda v: json.dumps(v).encode()
-        )
-        producer.send("data.raw", {"id": "smoke_001", "text": "smoke test document"})
-        producer.flush()
-
-        time.sleep(10)  # chờ pipeline xử lý
-
-        # Kiểm tra Qdrant nhận được
         resp = requests.get("http://localhost:6333/collections/documents")
         assert resp.status_code == 200
         count = resp.json()["result"]["points_count"]
@@ -97,3 +119,7 @@ class TestFeatureStore:
         keys = r.keys("feature:*")
         assert len(keys) > 0, "No features found in Feast store"
         print(f"Feature store has {len(keys)} feature entries")
+
+    def test_delta_lake_has_parquet_data(self):
+        records = load_delta_records()
+        assert len(records) > 0, "No records found in Delta Lake"

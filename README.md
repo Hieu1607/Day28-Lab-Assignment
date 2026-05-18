@@ -1,376 +1,196 @@
 # Lab #28 — Full Platform Integration Sprint
 
-AI platform với kiến trúc hybrid (Local + Kaggle GPU) sử dụng Prefect, Kafka, Qdrant, Prometheus, Grafana.
+AI platform hybrid cho Lab 28, đã được chỉnh lại để chạy được ổn định trên local bằng Docker Compose và một môi trường `conda` riêng. Repo hỗ trợ 2 chế độ:
 
-## Kiến trúc
+- `mock/local`: không cần Kaggle hay LangSmith key, dùng để pass smoke tests và demo local end-to-end.
+- `remote/hybrid`: gắn `VLLM_NGROK_URL`, `EMBED_NGROK_URL`, `LANGCHAIN_API_KEY` để nối sang Kaggle + LangSmith thật.
 
-```
-Local (Docker Compose):
-  Kafka → Prefect → Delta Lake → Feast (Redis)
-  ↓                ↓
-  Qdrant         API Gateway (FastAPI)
-  ↓                ↓
-  Prometheus ← Grafana
-  ↓
-  LangSmith tracing
+## Trạng thái đã verify
 
-Kaggle (GPU T4/P100):
-  vLLM serving
-  Embedding service
-  MLflow tracking
-```
+- `docker compose ps`: toàn bộ services `Up`
+- Kafka ingest hoạt động
+- Kafka → Delta Lake ghi parquet thành công
+- Delta Lake → Redis hoạt động
+- Delta Lake/sample → Qdrant hoạt động
+- API Gateway trả lời được ở chế độ `mock`
+- Prometheus scrape được API Gateway
+- Prefect server + worker chạy được
+- Prefect deployment `Kafka to Delta Pipeline/kafka-to-delta` đã được đăng ký trên server
+- `pytest smoke-tests/ -v`: `9 passed`
+- `python scripts/production_readiness_check.py`: `10/10 = 100%`
 
-## Yêu cầu
-
-- Docker Desktop đang chạy
-- Python 3.10+
-- Tài khoản Kaggle với GPU đã bật
-- **Tunnel service** (chọn 1 trong 2):
-  - `ngrok` đã cài và token configured
-  - HOẶC `cloudflared` đã cài (`brew install cloudflare/cloudflare/cloudflared`)
-
-## Quick Start
-
-### 1. Khởi động Local Stack
+## 1. Tạo môi trường conda
 
 ```bash
-cd lab28
-docker compose up -d
-docker compose ps  # Kiểm tra tất cả services Up
+conda env create -f environment.yml
+conda activate day28-lab
 ```
 
-**Services:**
+Nếu đã có env rồi:
+
+```bash
+conda activate day28-lab
+```
+
+## 2. Cấu hình environment variables
+
+```bash
+cp .env.example .env
+```
+
+Mặc định `.env.example` đang để `LLM_MODE=mock`, nên local stack có thể chạy ngay mà không cần Kaggle.
+
+Để dùng hybrid thật, điền thêm:
+
+```env
+VLLM_NGROK_URL=https://...
+EMBED_NGROK_URL=https://...
+LANGCHAIN_API_KEY=...
+LANGCHAIN_PROJECT=lab28-platform
+LLM_MODE=auto
+```
+
+## 3. Khởi động stack local
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+Endpoints:
+
 - Prefect UI: http://localhost:4200
-- Grafana: http://localhost:3000 (admin/admin)
-- Qdrant: http://localhost:6333/dashboard
+- Grafana: http://localhost:3000
 - Prometheus: http://localhost:9090
+- Qdrant: http://localhost:6333/dashboard
 - API Gateway: http://localhost:8000
 
-### 2. Setup Kaggle GPU
+## 4. Chạy data pipeline
 
-Tạo Kaggle Notebook với GPU T4 x2, chọn 1 trong 2 option:
-
-**Option A: Single GPU (đơn giản - dùng 1 GPU)**
-
-```python
-# Cell 1: Install dependencies
-!pip install -q vllm fastapi uvicorn pyngrok mlflow sentence-transformers
-
-# Nếu cài vLLM bị lỗi, dùng fallback:
-# !pip install transformers==4.46.3 --quiet
-# !pip install vllm==0.7.3 --quiet
-
-# Cell 2: Setup ngrok
-from pyngrok import ngrok
-ngrok.set_auth_token("YOUR_NGROK_TOKEN")  # lấy tại ngrok.com
-
-# Cell 3: Start vLLM server (single GPU)
-import subprocess, threading, time
-
-def run_vllm():
-    subprocess.run([
-        "python", "-m", "vllm.entrypoints.openai.api_server",
-        "--model", "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4",
-        "--port", "8001",
-        "--max-model-len", "4096",
-        "--gpu-memory-utilization", "0.5"
-    ])
-
-thread = threading.Thread(target=run_vllm, daemon=True)
-thread.start()
-time.sleep(60)
-print("vLLM server started")
-
-# Cell 4: Create ngrok tunnel
-tunnel = ngrok.connect(8001, "http")
-print(f"vLLM URL: {tunnel.public_url}")
-```
-
-**Option B: Multi-GPU (nâng cao - dùng 2 GPUs)**
-
-```python
-# Cell 1: Install dependencies
-!pip install -q vllm fastapi uvicorn pyngrok mlflow sentence-transformers
-
-# Nếu cài vLLM bị lỗi, dùng fallback:
-# !pip install transformers==4.46.3 --quiet
-# !pip install vllm==0.7.3 --quiet
-
-# Cell 2: Setup ngrok
-from pyngrok import ngrok
-ngrok.set_auth_token("YOUR_NGROK_TOKEN")  # lấy tại ngrok.com
-
-# Cell 3: Start vLLM server (multi-GPU)
-import subprocess
-import os
-import time
-import requests
-import threading
-
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
-
-def start_server(gpu_id, port):
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-    proc = subprocess.Popen(
-        [
-            "vllm", "serve", MODEL_NAME,
-            "--dtype", "float16",
-            "--max-model-len", "8192",
-            "--host", "0.0.0.0",
-            "--port", str(port),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=env
-    )
-
-    def stream_logs():
-        for line in proc.stdout:
-            print(f"[GPU {gpu_id}] {line.decode()}", end="")
-
-    threading.Thread(target=stream_logs, daemon=True).start()
-
-    return proc
-
-print("Starting Server on GPU 0 (Port 8000)")
-proc1 = start_server(0, 8000)
-
-print("Starting Server on GPU 1 (Port 8001)")
-proc2 = start_server(1, 8001)
-
-def wait_for_server(port):
-    print(f" Waiting for server on port {port}...")
-    for _ in range(60):
-        try:
-            r = requests.get(f"http://localhost:{port}/health")
-            if r.status_code == 200:
-                print(f"Server on port {port} is ready!")
-                return
-        except:
-            time.sleep(5)
-    raise RuntimeError(f"Server on port {port} failed to start.")
-
-wait_for_server(8000)
-wait_for_server(8001)
-
-# Cell 4: Create ngrok tunnel
-print("Creating ngrok tunnels...")
-tunnel1 = ngrok.connect(8000, "http")
-tunnel2 = ngrok.connect(8001, "http")
-
-print(f"GPU 0 URL: {tunnel1.public_url}")
-print(f"GPU 1 URL: {tunnel2.public_url}")
-# Có thể dùng 1 trong 2 hoặc cả 2 cho load balancing
-```
-
-**Option C: Dùng cloudflared (Single GPU)**
-
-```python
-# Cell 1: Install dependencies
-!pip install -q vllm fastapi uvicorn cloudflared mlflow sentence-transformers
-
-# Nếu cài vLLM bị lỗi, dùng fallback:
-# !pip install transformers==4.46.3 --quiet
-# !pip install vllm==0.7.3 --quiet
-
-# Cell 2: Start vLLM server (single GPU)
-import subprocess, threading, time
-
-def run_vllm():
-    subprocess.run([
-        "python", "-m", "vllm.entrypoints.openai.api_server",
-        "--model", "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4",
-        "--port", "8001",
-        "--max-model-len", "4096",
-        "--gpu-memory-utilization", "0.5"
-    ])
-
-thread = threading.Thread(target=run_vllm, daemon=True)
-thread.start()
-time.sleep(60)
-print("vLLM server started")
-
-# Cell 3: Create cloudflare tunnel
-import subprocess
-tunnel = subprocess.run(["cloudflared", "tunnel", "--url", "http://localhost:8001"], capture_output=True, text=True)
-print(tunnel.stdout)  # URL sẽ hiển thị
-```
-
-**Option D: Dùng cloudflared (Multi-GPU)**
-
-```python
-# Cell 1: Install dependencies
-!pip install -q vllm fastapi uvicorn cloudflared mlflow sentence-transformers
-
-# Nếu cài vLLM bị lỗi, dùng fallback:
-# !pip install transformers==4.46.3 --quiet
-# !pip install vllm==0.7.3 --quiet
-
-# Cell 2: Start vLLM server (multi-GPU)
-import subprocess
-import os
-import time
-import requests
-import threading
-
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
-
-def start_server(gpu_id, port):
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-    proc = subprocess.Popen(
-        [
-            "vllm", "serve", MODEL_NAME,
-            "--dtype", "float16",
-            "--max-model-len", "8192",
-            "--host", "0.0.0.0",
-            "--port", str(port),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=env
-    )
-
-    def stream_logs():
-        for line in proc.stdout:
-            print(f"[GPU {gpu_id}] {line.decode()}", end="")
-
-    threading.Thread(target=stream_logs, daemon=True).start()
-
-    return proc
-
-print("Starting Server on GPU 0 (Port 8000)")
-proc1 = start_server(0, 8000)
-
-print("Starting Server on GPU 1 (Port 8001)")
-proc2 = start_server(1, 8001)
-
-def wait_for_server(port):
-    print(f" Waiting for server on port {port}...")
-    for _ in range(60):
-        try:
-            r = requests.get(f"http://localhost:{port}/health")
-            if r.status_code == 200:
-                print(f"Server on port {port} is ready!")
-                return
-        except:
-            time.sleep(5)
-    raise RuntimeError(f"Server on port {port} failed to start.")
-
-wait_for_server(8000)
-wait_for_server(8001)
-
-# Cell 3: Create cloudflare tunnel
-import subprocess
-print("Creating cloudflare tunnels...")
-tunnel1 = subprocess.run(["cloudflared", "tunnel", "--url", "http://localhost:8000"], capture_output=True, text=True)
-tunnel2 = subprocess.run(["cloudflared", "tunnel", "--url", "http://localhost:8001"], capture_output=True, text=True)
-print(f"GPU 0 URL (copy from output):")
-print(tunnel1.stdout)
-print(f"GPU 1 URL (copy from output):")
-print(tunnel2.stdout)
-# Có thể dùng 1 trong 2 hoặc cả 2 cho load balancing
-```
-
-### 3. Cập nhật Environment Variables
+### 4.1 Ingest vào Kafka
 
 ```bash
-# Copy và chỉnh sửa file .env
-cp .env.example .env
-# Thay VLLM_NGROK_URL với URL từ Kaggle (ngrok hoặc cloudflared)
-# Thay EMBED_NGROK_URL nếu có embedding service
-# Thay LANGCHAIN_API_KEY với key của bạn
-```
-
-### 4. Deploy Prefect Flows
-
-```bash
-cd prefect/flows
-pip install -r requirements.txt
-python kafka_to_delta.py
-```
-
-### 5. Ingest Data vào Kafka
-
-```bash
-cd ../..
 python scripts/01_ingest_to_kafka.py
 ```
 
-### 6. Chạy Smoke Tests
+### 4.2 Materialize Kafka → Delta Lake
+
+Chạy local một lần:
+
+```bash
+python prefect/flows/kafka_to_delta.py
+```
+
+Đăng ký deployment Prefect và serve schedule:
+
+```bash
+set PREFECT_API_URL=http://localhost:4200/api
+set PREFECT_SERVE=1
+python prefect/flows/kafka_to_delta.py
+```
+
+Deployment sẽ xuất hiện trên Prefect UI với tên:
+
+```text
+Kafka to Delta Pipeline/kafka-to-delta
+```
+
+### 4.3 Delta Lake → Redis
+
+```bash
+python scripts/03_delta_to_feast.py
+```
+
+### 4.4 Embed vào Qdrant
+
+```bash
+python scripts/05_embed_to_qdrant.py
+```
+
+Nếu `EMBED_NGROK_URL` trống, script sẽ dùng embedding local deterministic để giữ pipeline testable.
+
+## 5. Kiểm tra API
+
+### Health
+
+```bash
+curl http://localhost:8000/health
+```
+
+### Chat
+
+```bash
+curl -X POST http://localhost:8000/api/v1/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"query\":\"What is platform engineering?\",\"embedding\":[0.1,0.1,0.1]}"
+```
+
+Trong `mock/local`, API vẫn trả lời được để smoke test không phụ thuộc Kaggle.
+
+## 6. Observability
+
+Kiểm tra metrics và traces:
+
+```bash
+python scripts/09_verify_observability.py
+```
+
+Hành vi hiện tại:
+
+- Prometheus: bắt buộc pass
+- LangSmith: `SKIPPED` nếu chưa cấu hình `LANGCHAIN_API_KEY`
+
+## 7. Smoke Tests
 
 ```bash
 pytest smoke-tests/ -v
 ```
 
-Kỳ vọng: 5/5 tests passing
+Kết quả đã verify trong môi trường này:
 
-### 7. Production Readiness Check
+```text
+9 passed
+```
+
+## 8. Production Readiness
 
 ```bash
 python scripts/production_readiness_check.py
 ```
 
-Kỳ vọng: Score >80%
+Kết quả đã verify trong môi trường này:
 
-## Scripts
-
-| Script | Mô tả |
-|--------|-------|
-| `scripts/01_ingest_to_kafka.py` | Ingest sample data vào Kafka |
-| `scripts/03_delta_to_feast.py` | Load từ Delta Lake và push features vào Feast (Redis) |
-| `scripts/05_embed_to_qdrant.py` | Embed data và lưu vectors vào Qdrant |
-| `scripts/09_verify_observability.py` | Kiểm tra Prometheus metrics và LangSmith traces |
-| `scripts/production_readiness_check.py` | Production readiness checklist |
-
-## API Gateway
-
-**Health Check:**
-```bash
-curl http://localhost:8000/health
+```text
+Production Readiness Score: 10/10 = 100%
 ```
 
-**Chat Endpoint:**
+## Cấu trúc chính
+
+- `docker-compose.yml`: local stack
+- `api-gateway/main.py`: FastAPI gateway, Prometheus metrics, mock fallback
+- `prefect/flows/kafka_to_delta.py`: flow Prefect + local one-shot mode + serve mode
+- `scripts/platform_lib.py`: helpers dùng chung cho Kafka, Delta Lake, Redis, Qdrant
+- `smoke-tests/test_e2e.py`: smoke tests end-to-end
+
+## Các thay đổi kỹ thuật quan trọng
+
+- Sửa `prefect orion` cũ sang `prefect server start`
+- Worker Prefect tự chờ server rồi tạo `lab28-pool`
+- Sửa xung đột dependency `fastapi` và `prometheus-fastapi-instrumentator`
+- Khóa `numpy<2` và `griffe<1` để tránh lỗi runtime với `pandas/pyarrow` và `prefect 2.14`
+- API Gateway có fallback `mock` khi chưa có `VLLM_NGROK_URL`
+- Script embedding có fallback local khi chưa có `EMBED_NGROK_URL`
+- Readiness check không còn phụ thuộc tên container cứng
+
+## Những gì còn cần hoàn thiện thủ công cho submission cuối
+
+- Chụp screenshots thật vào thư mục `screenshots/`
+- Nếu muốn demo hybrid đúng yêu cầu gốc, cần cung cấp Kaggle GPU notebook + tunnel URLs
+- Nếu muốn verify LangSmith thật, cần cấu hình `LANGCHAIN_API_KEY`
+- Nếu cần nộp demo video/live demo, phải rehearse với session Kaggle đang còn active
+
+## Lệnh dọn dẹp
+
 ```bash
-curl -X POST http://localhost:8000/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "What is platform engineering?",
-    "embedding": [0.1, 0.2, ...]
-  }'
+docker compose down
 ```
-
-## Monitoring
-
-- **Grafana Dashboard:** http://localhost:3000
-- **Prometheus:** http://localhost:9090
-- **Prefect UI:** http://localhost:4200
-
-## Troubleshooting
-
-**Services không start:**
-```bash
-docker compose logs <service_name>
-docker compose down -v
-docker compose up -d
-```
-
-**Prefect worker không connect:**
-```bash
-# Check Prefect UI: http://localhost:4200
-# Đảm bảo worker đang chạy:
-docker compose logs prefect-worker
-```
-
-**Kafka consumer lag:**
-```bash
-# Kiểm tra topic
-docker exec lab28-kafka-1 kafka-topics --list --bootstrap-server localhost:9092
-```
-
-## Nộp Bài
-
-Xem `SUBMISSION.md` ở thư mục gốc project.

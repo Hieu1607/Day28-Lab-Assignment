@@ -1,0 +1,23 @@
+name: day28-lab
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - fastapi==0.104.1
+      - uvicorn==0.24.0
+      - httpx==0.25.0
+      - prometheus-fastapi-instrumentator==6.1.0
+      - prefect==2.14.0
+      - kafka-python==2.0.2
+      - pandas==2.1.0
+      - pyarrow==14.0.0
+      - numpy<2
+      - griffe<1
+      - qdrant-client==1.9.1
+      - requests==2.32.3
+      - redis==5.0.8
+      - pytest==8.3.2
+      - python-dotenv==1.0.1
+      - langsmith==0.1.147
