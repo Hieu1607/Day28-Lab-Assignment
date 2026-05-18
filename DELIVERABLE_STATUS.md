@@ -14,12 +14,16 @@
 | Prefect deployment | Done | Deployment `Kafka to Delta Pipeline/kafka-to-delta` xuất hiện trên Prefect server |
 | Smoke tests | Done | [smoke_tests_results.txt](/C:/Users/Admin/Desktop/Day28-Lab-Assignment/smoke_tests_results.txt) |
 | Production readiness | Done | [production_readiness.txt](/C:/Users/Admin/Desktop/Day28-Lab-Assignment/production_readiness.txt) |
+| Screenshot: Prefect UI | Done | [prefect_ui.png](/C:/Users/Admin/Desktop/Day28-Lab-Assignment/screenshots/prefect_ui.png) |
+| Screenshot: API Gateway | Done | [api_gateway.png](/C:/Users/Admin/Desktop/Day28-Lab-Assignment/screenshots/api_gateway.png) |
+| Screenshot: Grafana | Done | [grafana_dashboard.png](/C:/Users/Admin/Desktop/Day28-Lab-Assignment/screenshots/grafana_dashboard.png) |
+| Screenshot: Smoke tests | Done | [smoke_tests_results.png](/C:/Users/Admin/Desktop/Day28-Lab-Assignment/smoke_tests_results.png) |
+| Screenshot: Production readiness | Done | [production_readiness.png](/C:/Users/Admin/Desktop/Day28-Lab-Assignment/production_readiness.png) |
 
 ## Còn lại hoặc không thể hoàn tất hoàn toàn trong môi trường này
 
 | Hạng mục | Trạng thái | Lý do |
 |---|---|---|
-| Screenshots demo trong `screenshots/` | Manual | Repo đã tạo thư mục sẵn, nhưng chưa chụp file PNG thật từ phiên submit |
 | LangSmith traces thực | Blocked by secret | Thiếu `LANGCHAIN_API_KEY` hợp lệ |
 | Hybrid Kaggle serving thật | Blocked by external infra | Thiếu Kaggle GPU session đang chạy và tunnel URL thật |
 | Live demo rehearsal | Manual | Cần người nộp tự chạy buổi demo với session thật |
